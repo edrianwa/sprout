@@ -5,7 +5,7 @@ Users can deposit XRP or RLUSD, lock funds for a chosen period, and Sprout pools
 
 ---
 # video technical demo
-[▶️ Watch Demo on Loom](https://www.loom.com/share/YOUR_VIDEO_ID)
+[▶️ Watch Demo on Loom](https://www.loom.com/share/8cb7e80ee0a44c939e4e4c7468e0f97e)
 
 ---
 
