@@ -12,8 +12,6 @@ const XUMM_API_SECRET = process.env.XUMM_API_SECRET || functions.config().xumm?.
 
 const xumm = new XummSdk(XUMM_API_KEY, XUMM_API_SECRET);
 const TREASURY_ADDRESS = "rpwJg3JHCX7dnaj4fBdVDvtZYyJQwZnvDG";
-// const USD_ISSUER = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
-// const USD_CURRENCY = "USD";
 
 const POOL_SECRET = process.env.POOL_SECRET! || functions.config().xrpl.pool_secret;
 const poolWallet = Wallet.fromSeed(POOL_SECRET);
@@ -24,7 +22,7 @@ async function ensureClientConnected() {
 }
 
 export const xummLogin = functions.https.onCall(async (data, context) => {
-    // Create a SignIn payload (no transaction, just proof of wallet ownership)
+
     const payload = {
         txjson: {
             TransactionType: "SignIn"
@@ -33,11 +31,9 @@ export const xummLogin = functions.https.onCall(async (data, context) => {
     const payloadResponse = await xumm.payload.create(payload);
     if (!payloadResponse) throw new functions.https.HttpsError("internal", "XUMM payload creation failed.");
     const { uuid, next } = payloadResponse;
-    // next.always is the QR/sign URL. uuid can be used to poll for status.
     return { uuid, url: next.always };
 });
 
-// Optional: add a callable to check login status and get the user wallet address
 export const xummGetLoginStatus = onCall(async (request) => {
     const uuid = typeof request.data?.uuid === "string" ? request.data.uuid : "";
     if (!uuid) {
@@ -50,7 +46,6 @@ export const xummGetLoginStatus = onCall(async (request) => {
         }
 
         const address = payload.response.account;
-        // Connect to devnet (will not reconnect if already connected)
         await ensureClientConnected();
 
         // Fetch balances
@@ -64,7 +59,6 @@ export const xummGetLoginStatus = onCall(async (request) => {
             });
             xrpBalance = (parseFloat(acctInfo.result.account_data.Balance) / 1_000_000).toFixed(6); // XRP is in drops
 
-            // Optionally, get RLUSD trustline balance
             const lines = await client.request({
                 command: "account_lines",
                 account: address,
@@ -154,10 +148,8 @@ export const requestEscrowPayment = onCall(async (request) => {
 
     if (escrow!.status !== "pending_payment") throw new HttpsError("failed-precondition", "Escrow already funded or not in pending_payment status");
 
-    // Prepare payment (XRP only; for RLUSD, handle IOU logic)
     const amountDrops = (escrow!.amount * 1_000_000).toString();
 
-    // Prepare a memo for traceability
     const MemoType = Buffer.from("ESCROW_ID", "utf8").toString("hex");
     const MemoData = Buffer.from(escrowId, "utf8").toString("hex");
 
@@ -178,11 +170,9 @@ export const requestEscrowPayment = onCall(async (request) => {
         }
     };
 
-    // Create the XUMM payload
     const payloadResponse = await xumm.payload.create(payload as any);
     if (!payloadResponse) throw new HttpsError("internal", "XUMM payload creation failed.");
 
-    // Save the payment request to escrow for future reconciliation (optional)
     await escrowRef.update({
         paymentPayload: {
             uuid: payloadResponse.uuid,
@@ -211,7 +201,6 @@ export const confirmEscrowPayment = onCall(
         const { escrowId } = request.data as any;
         if (!escrowId) throw new HttpsError("invalid-argument", "escrowId is required");
 
-        // Get escrow record and paymentPayload UUID
         const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
         const escrowSnap = await escrowRef.get();
         if (!escrowSnap.exists) throw new HttpsError("not-found", "Escrow not found");
@@ -220,7 +209,6 @@ export const confirmEscrowPayment = onCall(
 
         if (!uuid) throw new HttpsError("failed-precondition", "No payment payload attached to escrow");
 
-        // Check status with XUMM
         const payload = await xumm.payload.get(uuid);
         const txid = payload!.response?.txid;
 
@@ -268,7 +256,6 @@ async function provideLiquidityToAmm(xrpAmountDrops: string, usdAmount: string,e
     const client = new Client(XRPL_NET);
     await client.connect();
 
-    // AMMDeposit
     const ammDeposit:AMMDeposit = {
         TransactionType: "AMMDeposit" as const,
         Account: poolWallet.classicAddress,
@@ -308,7 +295,6 @@ export const withdrawEscrow = onCall(
         const { escrowId } = request.data as any;
         if (!escrowId) throw new HttpsError("invalid-argument", "escrowId is required");
 
-        // 1. Load escrow record
         const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
         const escrowSnap = await escrowRef.get();
         if (!escrowSnap.exists) throw new HttpsError("not-found", "Escrow not found");
@@ -317,13 +303,11 @@ export const withdrawEscrow = onCall(
         if (!escrow) throw new HttpsError("not-found", "Escrow not found");
         if (escrow.status !== "funded") throw new HttpsError("failed-precondition", "Escrow not funded yet");
 
-        // 2. Check unlock time
         const now = admin.firestore.Timestamp.now();
         if (now.toMillis() < escrow.unlockAt.toMillis()) {
             throw new HttpsError("failed-precondition", "Escrow is still locked");
         }
 
-        // 3. Calculate yield (simple APY, prorated by lock period)
         const principal = Number(escrow.amount);
         const lockDays = Number(escrow.lockPeriod) || 0;
         const apy = Number(escrow.yieldRate) || 0.12;
@@ -332,13 +316,11 @@ export const withdrawEscrow = onCall(
         const senderYield = yieldEarned * 0.5;
         const receiverPayout = principal + receiverYield;
 
-        // 4. Transfer payout from poolWallet to receiver (and sender for their yield)
         const client = new Client(XRPL_NET);
         await client.connect();
 
         let receiverTxResult, senderTxResult;
 
-        // --- Pay Receiver ---
         if (escrow.asset === "XRP") {
             // Receiver payout in XRP
             const paymentTx = {
@@ -388,7 +370,6 @@ export const withdrawEscrow = onCall(
             throw new HttpsError("invalid-argument", "Unknown asset type for escrow");
         }
 
-        // --- Pay Sender (their share of yield), only if different from receiver ---
         if (
             senderYield > 0.000001 &&
             escrow.senderWallet &&
@@ -441,7 +422,6 @@ export const withdrawEscrow = onCall(
 
         await client.disconnect();
 
-        // 5. Update escrow record
         await escrowRef.update({
             status: "withdrawn",
             withdrawnAt: admin.firestore.Timestamp.now(),
@@ -455,7 +435,6 @@ export const withdrawEscrow = onCall(
             }
         });
 
-        // 6. Return success and tx hashes
         return {
             success: true,
             receiverTxid: receiverTxResult.result.tx_json.hash || null,

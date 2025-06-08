@@ -4,6 +4,10 @@
 Users can deposit XRP or RLUSD, lock funds for a chosen period, and Sprout pools and supplies these funds to XRPL AMMs (Automated Market Makers) for yield—all managed from a central treasury wallet and authenticated with XUMM.
 
 ---
+# video technical demo
+[▶️ Watch Demo on Loom](https://www.loom.com/share/YOUR_VIDEO_ID)
+
+---
 
 ## 🚀 Features
 
