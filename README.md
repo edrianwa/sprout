@@ -82,12 +82,13 @@ service cloud.firestore {
 
 ## 🗝️ Key Firebase Functions
 
-| Function                | Purpose                                                     |
-|-------------------------|-------------------------------------------------------------|
-| `xummLogin`             | Initiates a XUMM QR wallet login                            |
-| `xummGetLoginStatus`    | Polls login status and returns XRPL wallet address          |
-| `createEscrow`          | Creates an escrow record in Firestore                       |
-| `confirmEscrowPayment`  | Verifies XUMM payment, sends funds to XRPL AMM for yield    |
+| Function               | Purpose                                                  |
+|------------------------|----------------------------------------------------------|
+| `xummLogin`            | Initiates a XUMM QR wallet login                         |
+| `xummGetLoginStatus`   | Polls login status and returns XRPL wallet address       |
+| `createEscrow`         | Creates an escrow record in Firestore                    |
+| `confirmEscrowPayment` | Verifies XUMM payment, sends funds to XRPL AMM for yield |
+| `withdrawEscrow`       | Withdraw escrowed funds after the lock period has ended  |
 
 ---
 
