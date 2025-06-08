@@ -204,80 +204,69 @@ export const requestEscrowPayment = onCall(async (request) => {
     };
 });
 
-export const confirmEscrowPayment = onCall(async (request) => {
-    const { escrowId } = request.data as any;
-    if (!escrowId) throw new HttpsError("invalid-argument", "escrowId is required");
 
-    // Get escrow record and paymentPayload UUID
-    const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
-    const escrowSnap = await escrowRef.get();
-    if (!escrowSnap.exists) throw new HttpsError("not-found", "Escrow not found");
-    const escrow = escrowSnap.data();
-    const uuid = escrow!.paymentPayload?.uuid;
+export const confirmEscrowPayment = onCall(
+    { timeoutSeconds: 60 }, // Short timeout, as we return quickly
+    async (request) => {
+        const { escrowId } = request.data as any;
+        if (!escrowId) throw new HttpsError("invalid-argument", "escrowId is required");
 
-    if (!uuid) throw new HttpsError("failed-precondition", "No payment payload attached to escrow");
+        // Get escrow record and paymentPayload UUID
+        const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
+        const escrowSnap = await escrowRef.get();
+        if (!escrowSnap.exists) throw new HttpsError("not-found", "Escrow not found");
+        const escrow = escrowSnap.data();
+        const uuid = escrow!.paymentPayload?.uuid;
 
-    // Check status with XUMM
-    const payload = await xumm.payload.get(uuid);
-    const txid = payload!.response?.txid;
+        if (!uuid) throw new HttpsError("failed-precondition", "No payment payload attached to escrow");
 
-    if (payload!.meta.signed && txid) {
-        await escrowRef.update({
-            status: "funded",
-            "paymentPayload.status": "signed",
-            "paymentPayload.txid": txid,
-            fundedAt: admin.firestore.Timestamp.now(),
-            auditTrail: admin.firestore.FieldValue.arrayUnion({
-                action: "funded",
-                at: admin.firestore.Timestamp.now(),
-                by: escrow!.senderWallet,
-                txid
-            })
-        });
-        try {
-            const xrpAmountDrops = (escrow!.amount * 1_000_000).toString(); // Convert XRP to drops
-            const usdAmount = escrow!.amount.toString();
+        // Check status with XUMM
+        const payload = await xumm.payload.get(uuid);
+        const txid = payload!.response?.txid;
 
-            const ammTx = await provideLiquidityToAmm(xrpAmountDrops, usdAmount);
-
+        if (payload!.meta.signed && txid) {
             await escrowRef.update({
-                ammProvision: {
-                    txid: ammTx.result.hash,
-                    ledger: ammTx.result.ledger_index,
-                    amountXRP: escrow!.amount,
-                    amountUSD: usdAmount,
-                    at: admin.firestore.Timestamp.now()
-                }
+                status: "funded",
+                "paymentPayload.status": "signed",
+                "paymentPayload.txid": txid,
+                fundedAt: admin.firestore.Timestamp.now(),
+                auditTrail: admin.firestore.FieldValue.arrayUnion({
+                    action: "funded",
+                    at: admin.firestore.Timestamp.now(),
+                    by: escrow!.senderWallet,
+                    txid
+                })
             });
-            return { success: true, txid, ammTx: ammTx.result.hash };
-        } catch (err) {
-            await escrowRef.update({
-                ammProvisionError: (err as Error).message,
-                ammAttemptedAt: admin.firestore.Timestamp.now()
-            });
-            return { success: true, txid, ammError: (err as Error).message };
+            try {
+                const xrpAmountDrops = (escrow!.amount * 1_000_000).toString();
+                const usdAmount = escrow!.amount.toString();
+
+                // Call AMM (non-blocking)
+                provideLiquidityToAmm(xrpAmountDrops, usdAmount, escrowId).catch((err) => {
+                    escrowRef.update({
+                        ammProvisionError: (err as Error).message,
+                        ammAttemptedAt: admin.firestore.Timestamp.now()
+                    });
+                });
+
+                // Return fast! Don’t wait for AMM tx to confirm
+                return { success: true, txid };
+            } catch (err) {
+                await escrowRef.update({
+                    ammProvisionError: (err as Error).message,
+                    ammAttemptedAt: admin.firestore.Timestamp.now()
+                });
+                return { success: true, txid, ammError: (err as Error).message };
+            }
+        } else {
+            return { success: false, signed: false };
         }
-    } else {
-        return { success: false, signed: false };
     }
-});
+);
 
-async function provideLiquidityToAmm(xrpAmountDrops: string, usdAmount: string) {
+async function provideLiquidityToAmm(xrpAmountDrops: string, usdAmount: string,escrowId: string) {
     const client = new Client(XRPL_NET);
     await client.connect();
-
-    // const usdCurrency: Currency = {
-    //     currency: USD_CURRENCY,
-    //     issuer: USD_ISSUER
-    // };
-    //
-    // const xrpCurrency: Currency = { currency: "XRP" };
-
-    // const amount2 = {
-    //     currency: USD_CURRENCY,
-    //     issuer: USD_ISSUER,
-    //     value: usdAmount.toString()
-    // };
 
     // AMMDeposit
     const ammDeposit:AMMDeposit = {
@@ -294,10 +283,186 @@ async function provideLiquidityToAmm(xrpAmountDrops: string, usdAmount: string) 
     };
 
     const prepared = await client.autofill(ammDeposit);
-    prepared.LastLedgerSequence = prepared!.LastLedgerSequence! + 10; // Give extra ledgers for safety
+    prepared.LastLedgerSequence = (prepared.LastLedgerSequence ?? 0) + 20;
     const signed = poolWallet.sign(prepared);
-    const tx = await client.submitAndWait(signed.tx_blob);
+    const tx = await client.submit(signed.tx_blob);
 
+    const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
+    await escrowRef.update({
+        ammProvision: {
+            txid: tx.result.tx_json.hash || null,
+            amountXRP: xrpAmountDrops,
+            amountUSD: usdAmount,
+            at: admin.firestore.Timestamp.now()
+        }
+    });
     await client.disconnect();
     return tx;
 }
+
+
+export const withdrawEscrow = onCall(
+    { timeoutSeconds: 60 },
+    async (request) => {
+        const USD_ISSUER = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
+        const { escrowId } = request.data as any;
+        if (!escrowId) throw new HttpsError("invalid-argument", "escrowId is required");
+
+        // 1. Load escrow record
+        const escrowRef = admin.firestore().collection("escrows").doc(escrowId);
+        const escrowSnap = await escrowRef.get();
+        if (!escrowSnap.exists) throw new HttpsError("not-found", "Escrow not found");
+        const escrow = escrowSnap.data();
+
+        if (!escrow) throw new HttpsError("not-found", "Escrow not found");
+        if (escrow.status !== "funded") throw new HttpsError("failed-precondition", "Escrow not funded yet");
+
+        // 2. Check unlock time
+        const now = admin.firestore.Timestamp.now();
+        if (now.toMillis() < escrow.unlockAt.toMillis()) {
+            throw new HttpsError("failed-precondition", "Escrow is still locked");
+        }
+
+        // 3. Calculate yield (simple APY, prorated by lock period)
+        const principal = Number(escrow.amount);
+        const lockDays = Number(escrow.lockPeriod) || 0;
+        const apy = Number(escrow.yieldRate) || 0.12;
+        const yieldEarned = principal * apy * (lockDays / 365);
+        const receiverYield = yieldEarned * 0.5;
+        const senderYield = yieldEarned * 0.5;
+        const receiverPayout = principal + receiverYield;
+
+        // 4. Transfer payout from poolWallet to receiver (and sender for their yield)
+        const client = new Client(XRPL_NET);
+        await client.connect();
+
+        let receiverTxResult, senderTxResult;
+
+        // --- Pay Receiver ---
+        if (escrow.asset === "XRP") {
+            // Receiver payout in XRP
+            const paymentTx = {
+                TransactionType: "Payment" as const,
+                Account: poolWallet.classicAddress,
+                Destination: escrow.receiverWallet,
+                Amount: Math.floor(receiverPayout * 1_000_000).toString(), // drops
+                Memos: [
+                    {
+                        Memo: {
+                            MemoType: Buffer.from("escrow_withdraw", "utf8").toString("hex"),
+                            MemoData: Buffer.from(escrowId, "utf8").toString("hex")
+                        }
+                    }
+                ]
+            };
+            const prepared = await client.autofill(paymentTx);
+            (prepared as any).LastLedgerSequence = ((prepared as any).LastLedgerSequence ?? 0) + 20;
+            const signed = poolWallet.sign(prepared);
+            receiverTxResult = await client.submit(signed.tx_blob);
+        } else if (escrow.asset === "RLUSD" || escrow.asset === "USD") {
+            // Receiver payout in RLUSD/USD
+            const paymentTx = {
+                TransactionType: "Payment" as const,
+                Account: poolWallet.classicAddress,
+                Destination: escrow.receiverWallet,
+                Amount: {
+                    currency: escrow.asset,
+                    issuer: USD_ISSUER,
+                    value: receiverPayout.toFixed(6)
+                },
+                Memos: [
+                    {
+                        Memo: {
+                            MemoType: Buffer.from("escrow_withdraw", "utf8").toString("hex"),
+                            MemoData: Buffer.from(escrowId, "utf8").toString("hex")
+                        }
+                    }
+                ]
+            };
+            const prepared = await client.autofill(paymentTx);
+            (prepared as any).LastLedgerSequence = ((prepared as any).LastLedgerSequence ?? 0) + 20;
+            const signed = poolWallet.sign(prepared);
+            receiverTxResult = await client.submit(signed.tx_blob);
+        } else {
+            await client.disconnect();
+            throw new HttpsError("invalid-argument", "Unknown asset type for escrow");
+        }
+
+        // --- Pay Sender (their share of yield), only if different from receiver ---
+        if (
+            senderYield > 0.000001 &&
+            escrow.senderWallet &&
+            escrow.senderWallet !== escrow.receiverWallet
+        ) {
+            if (escrow.asset === "XRP") {
+                const paymentTx = {
+                    TransactionType: "Payment" as const,
+                    Account: poolWallet.classicAddress,
+                    Destination: escrow.senderWallet,
+                    Amount: Math.floor(senderYield * 1_000_000).toString(),
+                    Memos: [
+                        {
+                            Memo: {
+                                MemoType: Buffer.from("escrow_yield", "utf8").toString("hex"),
+                                MemoData: Buffer.from(escrowId, "utf8").toString("hex")
+                            }
+                        }
+                    ]
+                };
+                const prepared = await client.autofill(paymentTx);
+                (prepared as any).LastLedgerSequence = ((prepared as any).LastLedgerSequence ?? 0) + 20;
+                const signed = poolWallet.sign(prepared);
+                senderTxResult = await client.submit(signed.tx_blob);
+            } else {
+                const paymentTx = {
+                    TransactionType: "Payment" as const,
+                    Account: poolWallet.classicAddress,
+                    Destination: escrow.senderWallet,
+                    Amount: {
+                        currency: escrow.asset,
+                        issuer: USD_ISSUER,
+                        value: senderYield.toFixed(6)
+                    },
+                    Memos: [
+                        {
+                            Memo: {
+                                MemoType: Buffer.from("escrow_yield", "utf8").toString("hex"),
+                                MemoData: Buffer.from(escrowId, "utf8").toString("hex")
+                            }
+                        }
+                    ]
+                };
+                const prepared = await client.autofill(paymentTx);
+                (prepared as any).LastLedgerSequence = ((prepared as any).LastLedgerSequence ?? 0) + 20;
+                const signed = poolWallet.sign(prepared);
+                senderTxResult = await client.submit(signed.tx_blob);
+            }
+        }
+
+        await client.disconnect();
+
+        // 5. Update escrow record
+        await escrowRef.update({
+            status: "withdrawn",
+            withdrawnAt: admin.firestore.Timestamp.now(),
+            withdrawalTx: receiverTxResult.result.tx_json.hash || null,
+            senderYieldTx: senderTxResult?.result.tx_json.hash || null,
+            yieldEarned,
+            payoutAmount: receiverPayout,
+            yieldSplit: {
+                receiverYield,
+                senderYield
+            }
+        });
+
+        // 6. Return success and tx hashes
+        return {
+            success: true,
+            receiverTxid: receiverTxResult.result.tx_json.hash || null,
+            senderTxid: senderTxResult?.result.tx_json.hash || null,
+            receiverPayout,
+            receiverYield,
+            senderYield
+        };
+    }
+);

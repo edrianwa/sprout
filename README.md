@@ -105,24 +105,6 @@ if (!XUMM_API_KEY || !XUMM_API_SECRET || !POOL_SECRET) {
 
 ---
 
-## 🟢 Troubleshooting
-
-- **Error: `join.decode: string expected`**  
-  → Your pool wallet secret is missing/invalid.  
-  **Fix:** Set with `firebase functions:config:set xrpl.pool_secret="sn..."`
-
-- **Error: `XUMM payload creation failed.`**  
-  → XUMM API key/secret missing or incorrect.
-
-- **Error: `LastLedgerSequence ... is greater than the transaction's LastLedgerSequence`**  
-  → Transaction expired before ledger inclusion.  
-  **Fix:** Add more buffer to `LastLedgerSequence` after autofill.
-
-- **Error 500**  
-  → Check function logs in the Firebase Console; usually a missing secret or misconfigured environment variable.
-
----
-
 ## 📚 Further Reading
 
 - [XRPL Devnet Faucet](https://xrpl.org/xrp-testnet-faucet.html?network=devnet)
@@ -149,4 +131,4 @@ Please include relevant logs and your `firebase functions:config:get` output (re
 
 ---
 
-*Built by [@edrianwa](https://github.com/edrianwa) & community.*
+*Built by [@edrianwa](https://github.com/edrianwa).*
